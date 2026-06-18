@@ -25,6 +25,14 @@ if "%TV_EXE%"=="" (
     for /f "tokens=*" %%i in ('where TradingView.exe 2^>nul') do set "TV_EXE=%%i"
 )
 
+REM Windows Store / MSIX installs cannot be started directly from WindowsApps.
+REM Launch the packaged FullTrust app through PowerShell so Chromium receives the CDP flag.
+if "%TV_EXE%"=="" (
+    powershell -NoProfile -ExecutionPolicy Bypass -Command "$pkg = Get-AppxPackage TradingView.Desktop -ErrorAction SilentlyContinue; if ($pkg) { Get-Process TradingView -ErrorAction SilentlyContinue | Stop-Process -Force; Start-Sleep -Seconds 2; $exe = Join-Path $pkg.InstallLocation 'TradingView.exe'; Start-Job -ScriptBlock { param($pf,$exe,$port) Invoke-CommandInDesktopPackage -PackageFamilyName $pf -AppId 'TradingView.Desktop' -Command $exe -Args ('--remote-debugging-port=' + $port) -PreventBreakaway } -ArgumentList $pkg.PackageFamilyName,$exe,'%PORT%' | Out-Null; Start-Sleep -Seconds 8; exit 0 } else { exit 1 }"
+    curl -s http://localhost:%PORT%/json/version >nul 2>&1
+    if %errorlevel% equ 0 goto check
+)
+
 if "%TV_EXE%"=="" (
     echo Error: TradingView not found.
     echo Checked: %%LOCALAPPDATA%%\TradingView, %%PROGRAMFILES%%\TradingView, WindowsApps

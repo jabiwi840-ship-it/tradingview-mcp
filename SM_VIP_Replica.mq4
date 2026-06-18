@@ -42,6 +42,22 @@ input bool   ShowArrBuf    = true;
 input int    History       = 3000;
 input int    SignalCooldownBars = 8;
 input bool   ConfirmTurn    = true;
+input bool   ShowDivergence = true;
+input int    DivergenceLookback = 40;
+input int    DivergenceSwingStrength = 2;
+input double DivergencePriceTolerancePips = 3.0;
+input double DivergenceMinRsiDelta = 2.0;
+input bool   DivergenceRequireBandTouch = false;
+input int    DivergenceBandTouchRadius = 3;
+input bool   RequireFirstDivergencePointExtreme = true;
+input bool   UseBandForFirstExtreme = true;
+input double FirstExtremeBandTolerance = 2.0;
+input bool   UseLevelForFirstExtreme = true;
+input double FirstExtremeLowLevel = 25.0;
+input double FirstExtremeHighLevel = 75.0;
+input bool   DrawDivergenceTextLabels = true;
+input color  BullishDivergenceColor = Lime;
+input color  BearishDivergenceColor = Magenta;
 
 double RsiLine[];
 double MiddleBand[];
@@ -51,6 +67,7 @@ double BuyArrows[];
 double SellArrows[];
 
 datetime lastAlertTime = 0;
+string divergencePrefix = "SM_VIP_REPLICA_DIV_";
 
 //+------------------------------------------------------------------+
 int OnInit()
@@ -90,6 +107,12 @@ int OnInit()
    SetIndexEmptyValue(5, EMPTY_VALUE);
 
    return(INIT_SUCCEEDED);
+}
+
+//+------------------------------------------------------------------+
+void OnDeinit(const int reason)
+{
+   DeleteDivergenceObjects();
 }
 
 //+------------------------------------------------------------------+
@@ -149,6 +172,8 @@ int OnCalculate(const int rates_total,
    int alertBar = MathMax(0, SignalBar);
    if(alertBar <= maxBars)
       CheckAlert(alertBar, time[alertBar]);
+
+   DrawDivergences(maxBars, time, high, low);
 
    return(rates_total);
 }
@@ -240,5 +265,270 @@ void CheckAlert(int bar, datetime signalTime)
 
    if(AlertsMobile)
       SendNotification(message);
+}
+
+//+------------------------------------------------------------------+
+void DrawDivergences(int maxBars,
+                     const datetime &time[],
+                     const double &high[],
+                     const double &low[])
+{
+   if(!ShowDivergence)
+   {
+      DeleteDivergenceObjects();
+      return;
+   }
+
+   DeleteDivergenceObjects();
+
+   int strength = MathMax(1, DivergenceSwingStrength);
+   int start = MathMax(strength, maxBars - MathMax(strength + 2, DivergenceLookback));
+
+   for(int bar = start; bar >= strength; bar--)
+   {
+      if(IsPriceSwingLow(bar, low, strength) && HasBullishDivergence(bar, low, strength))
+         DrawDivergence(bar, FindPreviousSwingLow(bar, low, strength), time, low, true);
+
+      if(IsPriceSwingHigh(bar, high, strength) && HasBearishDivergence(bar, high, strength))
+         DrawDivergence(bar, FindPreviousSwingHigh(bar, high, strength), time, high, false);
+   }
+}
+
+//+------------------------------------------------------------------+
+bool HasBullishDivergence(int currentShift, const double &low[], int strength)
+{
+   int previousShift = FindPreviousSwingLow(currentShift, low, strength);
+
+   if(previousShift < 0)
+      return(false);
+
+   if(!IsFirstPointExtreme(previousShift, true))
+      return(false);
+
+   double tolerance = MathMax(0.0, DivergencePriceTolerancePips) * PipSize();
+   bool priceLower = low[currentShift] <= low[previousShift] + tolerance;
+   bool rsiHigher = RsiLine[currentShift] >= RsiLine[previousShift] + MathMax(0.0, DivergenceMinRsiDelta);
+
+   if(!priceLower || !rsiHigher)
+      return(false);
+
+   return(!DivergenceRequireBandTouch || HasLowerBandTouchNear(currentShift));
+}
+
+//+------------------------------------------------------------------+
+bool HasBearishDivergence(int currentShift, const double &high[], int strength)
+{
+   int previousShift = FindPreviousSwingHigh(currentShift, high, strength);
+
+   if(previousShift < 0)
+      return(false);
+
+   if(!IsFirstPointExtreme(previousShift, false))
+      return(false);
+
+   double tolerance = MathMax(0.0, DivergencePriceTolerancePips) * PipSize();
+   bool priceHigher = high[currentShift] >= high[previousShift] - tolerance;
+   bool rsiLower = RsiLine[currentShift] <= RsiLine[previousShift] - MathMax(0.0, DivergenceMinRsiDelta);
+
+   if(!priceHigher || !rsiLower)
+      return(false);
+
+   return(!DivergenceRequireBandTouch || HasUpperBandTouchNear(currentShift));
+}
+
+//+------------------------------------------------------------------+
+bool IsPriceSwingLow(int shift, const double &low[], int strength)
+{
+   for(int i = 1; i <= strength; i++)
+   {
+      if(low[shift] > low[shift - i] || low[shift] >= low[shift + i])
+         return(false);
+   }
+
+   return(true);
+}
+
+//+------------------------------------------------------------------+
+bool IsPriceSwingHigh(int shift, const double &high[], int strength)
+{
+   for(int i = 1; i <= strength; i++)
+   {
+      if(high[shift] < high[shift - i] || high[shift] <= high[shift + i])
+         return(false);
+   }
+
+   return(true);
+}
+
+//+------------------------------------------------------------------+
+int FindPreviousSwingLow(int currentShift, const double &low[], int strength)
+{
+   int lastShift = MathMin(Bars - strength - 1, currentShift + MathMax(strength + 2, DivergenceLookback));
+
+   for(int shift = currentShift + strength + 1; shift <= lastShift; shift++)
+   {
+      if(IsPriceSwingLow(shift, low, strength))
+         return(shift);
+   }
+
+   return(-1);
+}
+
+//+------------------------------------------------------------------+
+int FindPreviousSwingHigh(int currentShift, const double &high[], int strength)
+{
+   int lastShift = MathMin(Bars - strength - 1, currentShift + MathMax(strength + 2, DivergenceLookback));
+
+   for(int shift = currentShift + strength + 1; shift <= lastShift; shift++)
+   {
+      if(IsPriceSwingHigh(shift, high, strength))
+         return(shift);
+   }
+
+   return(-1);
+}
+
+//+------------------------------------------------------------------+
+bool HasLowerBandTouchNear(int centerShift)
+{
+   int radius = MathMax(0, DivergenceBandTouchRadius);
+
+   for(int offset = -radius; offset <= radius; offset++)
+   {
+      int shift = centerShift + offset;
+
+      if(shift < 0 || shift >= Bars)
+         continue;
+
+      if(RsiLine[shift] != EMPTY_VALUE && LowerBand[shift] != EMPTY_VALUE && RsiLine[shift] <= LowerBand[shift])
+         return(true);
+   }
+
+   return(false);
+}
+
+//+------------------------------------------------------------------+
+bool HasUpperBandTouchNear(int centerShift)
+{
+   int radius = MathMax(0, DivergenceBandTouchRadius);
+
+   for(int offset = -radius; offset <= radius; offset++)
+   {
+      int shift = centerShift + offset;
+
+      if(shift < 0 || shift >= Bars)
+         continue;
+
+      if(RsiLine[shift] != EMPTY_VALUE && UpperBand[shift] != EMPTY_VALUE && RsiLine[shift] >= UpperBand[shift])
+         return(true);
+   }
+
+   return(false);
+}
+
+//+------------------------------------------------------------------+
+bool IsFirstPointExtreme(int shift, bool bullish)
+{
+   if(!RequireFirstDivergencePointExtreme)
+      return(true);
+
+   bool bandExtreme = false;
+   bool levelExtreme = false;
+
+   if(UseBandForFirstExtreme)
+   {
+      double tolerance = MathMax(0.0, FirstExtremeBandTolerance);
+
+      if(bullish)
+         bandExtreme = RsiLine[shift] <= LowerBand[shift] + tolerance;
+      else
+         bandExtreme = RsiLine[shift] >= UpperBand[shift] - tolerance;
+   }
+
+   if(UseLevelForFirstExtreme)
+   {
+      if(bullish)
+         levelExtreme = RsiLine[shift] <= FirstExtremeLowLevel;
+      else
+         levelExtreme = RsiLine[shift] >= FirstExtremeHighLevel;
+   }
+
+   if(UseBandForFirstExtreme && UseLevelForFirstExtreme)
+      return(bandExtreme || levelExtreme);
+
+   if(UseBandForFirstExtreme)
+      return(bandExtreme);
+
+   if(UseLevelForFirstExtreme)
+      return(levelExtreme);
+
+   return(true);
+}
+
+//+------------------------------------------------------------------+
+void DrawDivergence(int currentShift,
+                    int previousShift,
+                    const datetime &time[],
+                    const double &price[],
+                    bool bullish)
+{
+   if(previousShift < 0)
+      return;
+
+   int window = WindowFind("SM_VIP Replica");
+   if(window < 0)
+      window = WindowFind("SM VIP Replica");
+   if(window < 0)
+      window = 1;
+
+   string side = bullish ? "BULL" : "BEAR";
+   color lineColor = bullish ? BullishDivergenceColor : BearishDivergenceColor;
+
+   string smLine = divergencePrefix + side + "_SM_" + IntegerToString(currentShift);
+   ObjectCreate(0, smLine, OBJ_TREND, window, time[previousShift], RsiLine[previousShift], time[currentShift], RsiLine[currentShift]);
+   ObjectSetInteger(0, smLine, OBJPROP_COLOR, lineColor);
+   ObjectSetInteger(0, smLine, OBJPROP_WIDTH, 2);
+   ObjectSetInteger(0, smLine, OBJPROP_RAY, false);
+   ObjectSetInteger(0, smLine, OBJPROP_HIDDEN, true);
+
+   string priceLine = divergencePrefix + side + "_PRICE_" + IntegerToString(currentShift);
+   ObjectCreate(0, priceLine, OBJ_TREND, 0, time[previousShift], price[previousShift], time[currentShift], price[currentShift]);
+   ObjectSetInteger(0, priceLine, OBJPROP_COLOR, lineColor);
+   ObjectSetInteger(0, priceLine, OBJPROP_STYLE, STYLE_DOT);
+   ObjectSetInteger(0, priceLine, OBJPROP_WIDTH, 1);
+   ObjectSetInteger(0, priceLine, OBJPROP_RAY, false);
+   ObjectSetInteger(0, priceLine, OBJPROP_HIDDEN, true);
+
+   if(DrawDivergenceTextLabels)
+   {
+      string label = divergencePrefix + side + "_LABEL_" + IntegerToString(currentShift);
+      ObjectCreate(0, label, OBJ_TEXT, window, time[currentShift], RsiLine[currentShift]);
+      ObjectSetString(0, label, OBJPROP_TEXT, bullish ? "Bull div" : "Bear div");
+      ObjectSetString(0, label, OBJPROP_FONT, "Arial");
+      ObjectSetInteger(0, label, OBJPROP_FONTSIZE, 8);
+      ObjectSetInteger(0, label, OBJPROP_COLOR, lineColor);
+      ObjectSetInteger(0, label, OBJPROP_HIDDEN, true);
+   }
+}
+
+//+------------------------------------------------------------------+
+void DeleteDivergenceObjects()
+{
+   for(int i = ObjectsTotal(0, 0, -1) - 1; i >= 0; i--)
+   {
+      string name = ObjectName(0, i, 0, -1);
+
+      if(StringFind(name, divergencePrefix) == 0)
+         ObjectDelete(0, name);
+   }
+}
+
+//+------------------------------------------------------------------+
+double PipSize()
+{
+   if(Digits == 3 || Digits == 5)
+      return(Point * 10.0);
+
+   return(Point);
 }
 //+------------------------------------------------------------------+
